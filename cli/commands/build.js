@@ -98,31 +98,49 @@ exports.config = function (logger, config, cli) {
 							callback: function (projectDir) {
 								if (projectDir === '') {
 									// no option value was specified
-									// check if current directory is a valid dir
-									// if not output meaningful error message
+									// set project dir to current directory
 									projectDir = conf.options['project-dir'].default;
-									if (!fs.existsSync(path.join(projectDir, 'tiapp.xml'))) {
-										return;
-									}
 								}
 
-								// load the tiapp.xml
+								// verify whether the project is an 'app' or 'module'
+								// load tiapp.xml for app
+								// load timodule.xml for module
 								try {
-									var tiapp = cli.tiapp = new tiappxml(path.join(projectDir, 'tiapp.xml'));
+									if (fs.existsSync(path.join(projectDir, 'tiapp.xml'))) {
+										var tiapp = cli.tiapp = new tiappxml(path.join(projectDir, 'tiapp.xml'));
+
+										tiapp.properties || (tiapp.properties = {});
+
+										// make sure the tiapp.xml is sane
+										ti.validateTiappXml(logger, config, tiapp);
+
+										// check that the Titanium SDK version is correct
+										if (!ti.validateCorrectSDK(logger, config, cli, 'build')) {
+											throw new cli.GracefulShutdown();
+										}
+
+										cli.argv.type = 'app';
+										dump("FOUND tiapp.xml");
+
+									} else if (fs.existsSync(path.join(projectDir, 'timodule.xml'))) {
+										// QUESTION: instead of using tiappxml,
+										// should we parse 'timodule.xml' differently?
+										// at the moment existing build.py doesn't use timodule.xml
+										var timodule = cli.timodule = new tiappxml(path.join(projectDir, 'timodule.xml'));
+										timodule.properties || (timodule.properties = {});
+
+										cli.argv.type = 'module';
+										dump("FOUND timodule.xml");
+
+									} else {
+										dump("FOUND nothing");
+										// neither app nor module
+										return;
+									}
 								} catch (ex) {
 									logger.error(ex);
 									logger.log();
 									process.exit(1);
-								}
-
-								tiapp.properties || (tiapp.properties = {});
-
-								// make sure the tiapp.xml is sane
-								ti.validateTiappXml(logger, config, tiapp);
-
-								// check that the Titanium SDK version is correct
-								if (!ti.validateCorrectSDK(logger, config, cli, 'build')) {
-									throw new cli.GracefulShutdown();
 								}
 
 								return projectDir;
@@ -142,6 +160,7 @@ exports.config = function (logger, config, cli) {
 							},
 							required: true,
 							validate: function (projectDir, callback) {
+								dump("VALIDATE");
 								var isDefault = projectDir == conf.options['project-dir'].default;
 
 								var dir = appc.fs.resolvePath(projectDir);
@@ -150,22 +169,41 @@ exports.config = function (logger, config, cli) {
 									return callback(new Error(__('Project directory does not exist')));
 								}
 
-								var tiappFile = path.join(dir, 'tiapp.xml'),
-									root = path.resolve('/');
+								var isFound,
+								root = path.resolve('/');
 
-								// try to find the tiapp.xml
-								while (!fs.existsSync(tiappFile)) {
-									dir = path.dirname(dir);
-									if (dir == root) {
-										if (!isDefault) {
-											callback(new Error(__('Invalid project directory "%s" because tiapp.xml not found', projectDir)));
-											return;
-										} else {
-											callback(true);
-											return;
+								['tiapp.xml', 'timodule.xml'].some(function (tiXml) {
+									dump(">>" + tiXml);
+									dir = appc.fs.resolvePath(projectDir);
+									var tiFile = path.join(dir, tiXml);
+									dump(">"+tiFile);
+
+									while (!fs.existsSync(tiFile)) {
+										dir = path.dirname(dir);
+										if (dir == root) {
+											isFound = false;
+											break;
 										}
+										tiFile = path.join(dir, tiXml);
+										dump("--> " + tiFile);
 									}
-									tiappFile = path.join(dir, 'tiapp.xml');
+
+									// Found the xml file, break the loop
+									if (fs.existsSync(tiFile)) {
+										isFound = true;
+										return true;
+									}
+									dump(">>> " + dir);
+								});
+
+								if (!isFound && dir == root && isDefault) {
+									callback(true);
+									return;
+								}
+
+								if (!isFound) {
+									callback(new Error(__('Invalid project directory "%s" because tiapp.xml or timodule.xml not found', projectDir)));
+									return;
 								}
 
 								callback(null, dir);
@@ -184,7 +222,21 @@ exports.config = function (logger, config, cli) {
 
 exports.validate = function (logger, config, cli) {
 	// TODO: set the type to 'app' for now, but we'll need to determine if the project is an app or a module
-	cli.argv.type = 'app';
+	//cli.argv.type = 'app';
+
+	if (cli.argv.type === 'module') {
+		logger.info("------ module validate");
+
+		return function (finished) {
+			var result = ti.validatePlatformOptions(logger, config, cli, 'buildModule');
+			if (result && typeof result == 'function') {
+				result();
+			}
+			finished(result);
+		};
+
+	} else {
+		logger.info("------ app validate");
 
 	ti.validatePlatform(logger, cli, 'platform');
 
@@ -210,11 +262,16 @@ exports.validate = function (logger, config, cli) {
 			next(result);
 		}
 	};
+}
 };
 
 exports.run = function (logger, config, cli, finished) {
-	var platform = ti.resolvePlatform(cli.argv.platform),
-		buildModule = path.join(__dirname, '..', '..', platform, 'cli', 'commands', '_build.js'),
+	logger.info("----->>> run");
+	logger.info("----->>> cli.argv.type: " + cli.argv.type);
+
+	var buildFile = (cli.argv.type === 'module') ? '_buildModule.js' :'_build.js',
+		platform = ti.resolvePlatform(cli.argv.platform),
+		buildModule = path.join(__dirname, '..', '..', platform, 'cli', 'commands', buildFile),
 		counter = 0;
 
 	if (!fs.existsSync(buildModule)) {
