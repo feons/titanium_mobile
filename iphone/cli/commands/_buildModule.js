@@ -274,7 +274,7 @@ iOSModuleBuilder.prototype.processTiXcconfig = function (next) {
 					value = match[2].trim();
 
 				bindingMatch = bindingReg.exec(value);
-				if(bindingMatch!=null){
+				if (bindingMatch != null) {
 					while (bindingMatch != null) {
 						keyList.push(bindingMatch[1]);
 						bindingMatch = bindingReg.exec(value);
