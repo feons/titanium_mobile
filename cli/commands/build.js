@@ -125,7 +125,7 @@ exports.config = function (logger, config, cli) {
 									} else if (fs.existsSync(path.join(projectDir, 'timodule.xml'))) {
 										// QUESTION: instead of using tiappxml,
 										// should we parse 'timodule.xml' differently?
-										// at the moment existing build.py doesn't use timodule.xml
+										// build.py doesn't use timodule.xml
 										var timodule = cli.timodule = new tiappxml(path.join(projectDir, 'timodule.xml'));
 										timodule.properties || (timodule.properties = {});
 
@@ -170,7 +170,7 @@ exports.config = function (logger, config, cli) {
 								}
 
 								var isFound,
-								root = path.resolve('/');
+									root = path.resolve('/');
 
 								['tiapp.xml', 'timodule.xml'].some(function (tiXml) {
 									dump(">>" + tiXml);
@@ -238,31 +238,31 @@ exports.validate = function (logger, config, cli) {
 	} else {
 		logger.info("------ app validate");
 
-	ti.validatePlatform(logger, cli, 'platform');
+		ti.validatePlatform(logger, cli, 'platform');
 
-	// since we need validate() to be async, we return a function in which the cli
-	// will immediately call
-	return function (finished) {
-		function next(result) {
-			if (result !== false) {
-				// no error, load the tiapp.xml plugins
-				ti.loadPlugins(logger, config, cli, cli.argv['project-dir'], function () {
+		// since we need validate() to be async, we return a function in which the cli
+		// will immediately call
+		return function (finished) {
+			function next(result) {
+				if (result !== false) {
+					// no error, load the tiapp.xml plugins
+					ti.loadPlugins(logger, config, cli, cli.argv['project-dir'], function () {
+						finished(result);
+					});
+				} else {
 					finished(result);
-				});
-			} else {
-				finished(result);
+				}
 			}
-		}
 
-		// loads the platform specific bulid command and runs its validate() function
-		var result = ti.validatePlatformOptions(logger, config, cli, 'build');
-		if (result && typeof result == 'function') {
-			result(next);
-		} else {
-			next(result);
-		}
-	};
-}
+			// loads the platform specific bulid command and runs its validate() function
+			var result = ti.validatePlatformOptions(logger, config, cli, 'build');
+			if (result && typeof result == 'function') {
+				result(next);
+			} else {
+				next(result);
+			}
+		};
+	}
 };
 
 exports.run = function (logger, config, cli, finished) {

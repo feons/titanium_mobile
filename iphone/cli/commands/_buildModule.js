@@ -4,7 +4,7 @@
 * @module cli/_buildModule
 *
 * @copyright
-* Copyright (c) 2009-2014 by Appcelerator, Inc. All Rights Reserved.
+* Copyright (c) 2014 by Appcelerator, Inc. All Rights Reserved.
 *
 * @license
 * Licensed under the terms of the Apache Public License
@@ -18,10 +18,10 @@ var appc = require('node-appc'),
 	Builder = require('titanium-sdk/lib/builder'),
 	ioslib = require('ioslib'),
 	iosPackageJson = appc.pkginfo.package(module),
+	jsanalyze = require('titanium-sdk/lib/jsanalyze'),
+	ejs = require('ejs'),
 	fs = require('fs'),
 	path = require('path'),
-	readline = require('readline'),
-	stream = require('stream');
 	spawn = require('child_process').spawn,
 	ti = require('titanium-sdk'),
 	util = require('util'),
@@ -75,11 +75,47 @@ util.inherits(iOSModuleBuilder, Builder);
 
 iOSModuleBuilder.prototype.config = function (logger, config, cli) {
 	Builder.prototype.config.apply(this, arguments);
-	console.log("--- iOSModuleBuilder config");
 };
 
 iOSModuleBuilder.prototype.validate = function (logger, config, cli) {
-	console.log("--- iOSModuleBuilder validate");
+
+	this.manifestFile = path.join(cli.argv['project-dir'], 'manifest');
+	this.manifest = {};
+	if (!fs.existsSync(this.manifestFile)) {
+		this.logger.error(__('Missing %s', this.manifestFile));
+		this.logger.log();
+		process.exit(1);
+	}
+
+	var re = /^(\S+)\s*:\s*(.*)$/,
+		match,
+		requiredModuleKeys = [
+			'name',
+			'version',
+			'moduleid',
+			'description',
+			'copyright',
+			'license',
+			'copyright',
+			'platform',
+			'minsdk'
+		];
+
+	fs.readFileSync(this.manifestFile).toString().split('\n').forEach(function (line) {
+		match = line.match(re);
+		if (match) {
+			this.manifest[match[1].trim()] = match[2].trim();
+		}
+	}, this);
+
+	// check if all the required module keys are in the list
+	requiredModuleKeys.forEach(function (key) {
+		if (!this.manifest[key]) {
+			this.logger.error(__('Missing required manifest key "%s"', key));
+			this.logger.log();
+			process.exit(1);
+		}
+	}.bind(this));
 
 	this.xcodeEnv = null;
 
@@ -98,13 +134,7 @@ iOSModuleBuilder.prototype.validate = function (logger, config, cli) {
 			supportedVersions: iosPackageJson.vendorDependencies.xcode
 		}, function (err, iosInfo) {
 			this.iosInfo = iosInfo;
-
-			// Question: do we need to check cli.argv['ios-version']?
-			Object.keys(this.iosInfo.xcode).forEach(function (ver) {
-				if (ver != '__selected__' && (!this.xcodeEnv || this.iosInfo.xcode[ver].selected)) {
-						this.xcodeEnv = this.iosInfo.xcode[ver];
-				}
-			}, this);
+			this.xcodeEnv = this.iosInfo.selectedXcode;
 
 			if (!this.xcodeEnv) {
 				// this should never happen
@@ -124,105 +154,249 @@ iOSModuleBuilder.prototype.run = function (logger, config, cli, finished) {
 	this.logger = logger;
 
 	series(this, [
-		'initialize',
+		function (next) {
+			cli.emit('build.pre.construct', this, next);
+		},
 
-		'processManifest',
-		'validateLicense',
-		//'validateTiXcconfig',
-		//'compileJS', <--- figure this out
+		//'doAnalytics', //TODO <----
+		'initialize',
+		'loginfo',
+		'processLicense',
+		'processTiXcconfig',
+		'compileJS',
+		'generateExport',
 		'buildModule',
 		'createUniBinary',
-		//'genereateDoc',
-		//'packageModule',
-	], function () {
-		finished();
+		'generateDoc',
+		'packageModule',
+	], function (err) {
+		cli.emit('build.finalize', this, function () {
+			finished(err);
+		});
 	});
 };
 
 iOSModuleBuilder.prototype.initialize = function (next) {
 	console.log("-- iOSBuilder.prototype.initialize");
-	next();
-};
 
-iOSModuleBuilder.prototype.processManifest = function (next) {
-	console.log("-- iOSBuilder.prototype.processManifest");
+	this.moduleIdAsIdentifier = this.manifest['moduleid'].replace(/[\s-]/g, '_').replace(/_+/g, '_').split(/\./).map(function (s) { return s.substring(0, 1).toUpperCase() + s.substring(1); }).join('');
+	this.tiSymbols = {};
+	this.metaData = [];
+	this.metaDataFile = path.join(this.projectDir, 'metadata.json');
+	this.titaniumIosSdkPath = appc.fs.resolvePath(__dirname, '..', '..');
+	this.templatesDir = path.join(this.titaniumIosSdkPath, 'templates');
+	this.assetsTemplateFile = path.join(this.templatesDir, 'module', 'default', 'template', 'iphone', 'Classes', '{{ModuleIdAsIdentifier}}ModuleAssets.m.ejs');
 
-	// Should we put this in a seperate place?
-	// Since it'll be used by module build for other platforms too
+	this.universalBinaryDir = path.join(this.projectDir, 'build');
 
-	var manifestFile = path.join(this.projectDir, 'manifest');
-
-	if (!fs.existsSync(manifestFile)) {
-		this.logger.error(__('Missing %s', manifestFile));
-		this.logger.log();
-		process.exit(1);
+	this.assetsDir = path.join(this.projectDir, 'assets');
+	if (!fs.existsSync(this.assetsDir)) {
+		this.assetsDir = path.join(this.projectDir, '..', 'assets');
 	}
 
-	var	re = /^(\S+)\s*:\s*(.*)$/,
-		match,
-		instream = fs.createReadStream(manifestFile),
-		readLine = readline.createInterface(instream, new stream),
-		manifestObj = {},
-		requiredModuleKeys = [
-			'name',
-			'version',
-			'moduleid',
-			'description',
-			'copyright',
-			'license',
-			'copyright',
-			'platform',
-			'minsdk'
-		];
+	this.exampleDir = path.join(this.projectDir, 'example');
+	if (!fs.existsSync(this.exampleDir)) {
+		this.exampleDir = path.join(this.projectDir, '..', 'example');
+	}
 
-	readLine.on('line', function(line) {
-		match = line.match(re);
-		if (match) {
-			manifestObj[match[1].trim()] = match[2].trim();
-		}
-	});
+	this.documentation = [];
+	this.documentDir = path.join(this.projectDir, 'documentation');
+	if (!fs.existsSync(this.documentDir)) {
+		this.documentDir = path.join(this.projectDir, '..', 'documentation');
+	}
 
-	readLine.on('close', function() {
-		// check if all the required module keys are in the list
-		requiredModuleKeys.forEach(function (key) {
-			if (!manifestObj.hasOwnProperty(key)) {
-				this.logger.error(__('Missing required manifest key "%s"', key));
-				this.logger.log();
-				process.exit(1);
-			}
-		}.bind(this));
+	this.platformDir = path.join(this.projectDir, 'platform');
+	if (!fs.existsSync(this.platformDir)) {
+		this.platformDir = path.join(this.projectDir, '..', 'platform');
+	}
 
-		this.manifest = manifestObj;
-		next();
-	}.bind(this));
-};
+	this.licenseDefault = "TODO: place your license here and we'll include it in the module distribution";
+	this.licenseFile = path.join(this.projectDir, 'LICENSE');
+	if (!fs.existsSync(this.licenseFile)) {
+		this.licenseFile = path.join(this.projectDir, '..', 'LICENSE');
+	}
 
-iOSModuleBuilder.prototype.validateLicense = function (next) {
-	console.log("-- iOSBuilder.prototype.validateLicense");
+	this.tiXcconfig = {};
+	this.tiXcconfigFile = path.join(this.projectDir, 'titanium.xcconfig');
+
 	next();
 };
 
-iOSModuleBuilder.prototype.validateTiXcconfig = function (next) {
-	console.log("-- iOSBuilder.prototype.validateTiXcconfig");
+iOSModuleBuilder.prototype.loginfo = function (next) {
+	this.logger.info(__('Project directory: %s', this.projectDir.cyan));
+	this.logger.info(__('Module ID: %s', this.manifest['moduleid'].cyan));
+
+	next();
+};
+
+iOSModuleBuilder.prototype.dirWalker = function (currentPath, callback) {
+	var files = fs.readdirSync(currentPath);
+	for (var i in files) {
+		var currentFile = path.join(currentPath, files[i]);
+		var stats = fs.statSync(currentFile);
+
+		if (stats.isFile()) {
+			callback(currentFile);
+		} else if (stats.isDirectory()) {
+			this.dirWalker(currentFile, callback);
+		}
+	}
+};
+
+iOSModuleBuilder.prototype.processLicense = function (next) {
+
+	if (fs.existsSync(this.licenseFile)) {
+		if (fs.readFileSync(this.licenseFile).toString().indexOf(this.licenseDefault) != -1) {
+			this.logger.warn(__('Please update the LICENSE file with your license text before distributing.'));
+		}
+	}
+	next();
+};
+
+iOSModuleBuilder.prototype.processTiXcconfig = function (next) {
+
+	var	re = /^(\S+)\s*=\s*(.*)$/,
+		bindingReg = /\$\(([^$]+)\)/g,
+		match,
+		bindingMatch;
+
+	if (fs.existsSync(this.tiXcconfigFile)) {
+		fs.readFileSync(this.tiXcconfigFile).toString().split('\n').forEach(function (line) {
+			match = line.match(re);
+			if (match) {
+				var value = match[2].trim();
+				bindingMatch = value.match(bindingReg);
+				if (bindingMatch) {
+					bindingMatch.forEach(function (key) {
+						// TODO grab keys in $( )
+						//dump(key);
+						//$(TITANIUM_BASE_SDK) $(TITANIUM_BASE_SDK2)
+					});
+				} else {
+					this.tiXcconfig[match[1].trim()] = value;
+				}
+			}
+		}, this);
+	}
+
 	next();
 };
 
 iOSModuleBuilder.prototype.compileJS = function (next) {
 	console.log("-- iOSBuilder.prototype.compileJS");
 
-	// [Module ID].js, this is an optional file
-	// eg. com.example.test.js
-	var moduleJS =  this.manifest.moduleid + '.js',
-		jsFile = path.join(this.projectDir, 'assets', moduleJS );
-	if (!fs.existsSync(manifestFile)) {
-		jsFile = path.join(this.projectDir, '..', 'assets', moduleJS );
-	}
+	var moduleJS = this.manifest.moduleid + '.js',
+		jsFile = path.join(this.assetsDir, moduleJS ),
+		renderData = {
+			'moduleIdAsIdentifier' : this.moduleIdAsIdentifier,
+			'mainEncryptedAssetReturn': 'return filterDataInRange([NSData dataWithBytesNoCopy:data length:sizeof(data) freeWhenDone:NO], ranges[0]);',
+			'allEncryptedAssetsReturn': 'NSNumber *index = [map objectForKey:path];'
+				+ '\n\t\tif (index == nil) {\n\t\t\treturn nil;\n\t\t}'
+				+ '\n\t\treturn filterDataInRange([NSData dataWithBytesNoCopy:data length:sizeof(data) freeWhenDone:NO], ranges[index.integerValue]);'
+		},
+		_t = this;
 
-	if (!fs.existsSync(manifestFile)) {
+	this.jsFilesToEncrypt = [ jsFile ];
+
+	function reRenderTemplate() {
+		var data = ejs.render(fs.readFileSync(_t.assetsTemplateFile).toString(), renderData),
+			moduleAssetsFile = path.join(_t.projectDir, 'Classes', _t.moduleIdAsIdentifier+'ModuleAssets.m');
+
+		_t.logger.debug(__('Writing module assets file: %s', moduleAssetsFile.cyan));
+		fs.writeFileSync(moduleAssetsFile, data);
+
 		next();
 	}
 
-	console.log(" found " + moduleJS +" in " + jsFile);
+	var titaniumPrepHook = this.cli.createHook('build.ios.titaniumprep', this, function (exe, args, opts, done) {
+		var tries = 0,
+			completed = false,
+			jsFilesToEncrypt = opts.jsFiles,
+			placeHolderName = opts.placeHolder;
+
+		this.logger.info('Encrypting JavaScript files: %s', (exe + ' "' + args.join('" "') + '"').cyan);
+		jsFilesToEncrypt.forEach(function (file) {
+			this.logger.debug(__('Preparing %s', file.cyan));
+		}, this);
+
+		async.whilst(
+			function () {
+				if (tries > 3) {
+					// we failed 3 times, so just give up
+					this.logger.error(__('titanium_prep failed to complete successfully'));
+					this.logger.error(__('Try cleaning this project and build again') + '\n');
+					process.exit(1);
+				}
+				return !completed;
+			},
+			function (cb) {
+				var child = spawn(exe, args, opts),
+					out = '';
+
+				child.stdin.write(jsFilesToEncrypt.join('\n'));
+				child.stdin.end();
+
+				child.stdout.on('data', function (data) {
+					out += data.toString();
+				});
+
+				child.on('close', function (code) {
+					if (code) {
+						this.logger.error(__('titanium_prep failed to run (%s)', code) + '\n');
+						process.exit(1);
+					}
+
+					if (out.indexOf('initWithObjectsAndKeys') !== -1) {
+						// success!
+						renderData[placeHolderName] = out;
+
+						completed = true;
+					} else {
+						// failure, maybe it was a fluke, try again
+						this.logger.warn(__('titanium_prep failed to complete successfully, trying again'));
+						tries++;
+					}
+					cb();
+				}.bind(this));
+			}.bind(this),
+			done
+		);
+	});
+
+	// first compile module js
+	titaniumPrepHook(
+		path.join(this.titaniumIosSdkPath, 'titanium_prep'),
+		[this.manifest['moduleid'], this.assetsDir],
+		{'jsFiles': this.jsFilesToEncrypt, 'placeHolder': 'mainEncryptedAsset'},
+		null
+	);
+
+	this.dirWalker(this.assetsDir, function (file) {
+		if (path.extname(file) === '.js' && this.jsFilesToEncrypt.indexOf(file) === -1) {
+			this.jsFilesToEncrypt.push(file);
+		}
+	}.bind(this));
+
+	titaniumPrepHook(
+		path.join(this.titaniumIosSdkPath, 'titanium_prep'),
+		[this.manifest['moduleid'], this.assetsDir],
+		{'jsFiles': this.jsFilesToEncrypt, 'placeHolder': 'allEncryptedAssets'},
+		reRenderTemplate
+	);
+};
+
+iOSModuleBuilder.prototype.generateExport = function (next) {
+	console.log("-- iOSBuilder.prototype.generateExport");
+
+	this.jsFilesToEncrypt.forEach(function(file) {
+		var r = jsanalyze.analyzeJsFile(file, { minify: true });
+		this.tiSymbols[file] = r.symbols;
+		this.metaData.push.apply(this.metaData, r.symbols);
+	}.bind(this));
+
+	fs.existsSync(this.metaDataFile) && fs.unlinkSync(this.metaDataFile);
+	fs.writeFileSync('metadata.json', JSON.stringify({ "exports": this.metaData }));
+
 	next();
 };
 
@@ -323,65 +497,47 @@ iOSModuleBuilder.prototype.createUniBinary = function (next) {
 	// Create a universal build by merging the all builds to a single binary
 	var binaryFiles = [],
 		outputFile = path.join(this.projectDir, 'build', 'lib'+this.manifest['moduleid']+'.a'),
-		lipoArgs = ['-create',
-					'-output',
-					outputFile
+		lipoArgs = [
+			'-create',
+			'-output',
+			outputFile
 		];
 
-	var traverseDirectory = function (currentPath) {
-		var files = fs.readdirSync(currentPath);
-		for (var i in files) {
-			var currentFile = path.join(currentPath, files[i]);
-			var stats = fs.statSync(currentFile);
-
-			if (stats.isFile() &&
-				path.extname(currentFile) === '.a' &&
-				currentFile.indexOf('test.build') === -1 &&
-				currentFile.indexOf('Release-') > -1) {
-					binaryFiles.push(currentFile);
-			} else if (stats.isDirectory()) {
-				traverseDirectory(currentFile);
-			}
+	this.dirWalker(this.universalBinaryDir, function (file) {
+		if (path.extname(file) === '.a'
+			&& file.indexOf('test.build') === -1
+			&& file.indexOf('Release-') > -1
+		) {
+			binaryFiles.push(file);
 		}
-	};
+	}.bind(this));
 
-	traverseDirectory(path.join(this.projectDir, 'build'));
-	appc.subprocess.run('lipo', binaryFiles.concat(lipoArgs), function (code, out, err) {
+	appc.subprocess.run(this.xcodeEnv.executables.lipo, binaryFiles.concat(lipoArgs), function (code, out, err) {
 		next();
 	});
 };
 
-
-iOSModuleBuilder.prototype.genereateDoc = function (next) {
+iOSModuleBuilder.prototype.generateDoc = function (next) {
 	console.log("-- iOSBuilder.prototype.genereateDoc");
 
-	var documentDir = path.join(this.projectDir, 'documentation'),
-		documentation = [];
-
-	if (!fs.existsSync(documentDir)) {
-		documentDir = path.join(this.projectDir, '..', 'documentation');
-	}
-
-	if (fs.existsSync(documentDir)) {
-		var markdown = require( "markdown" ).markdown;
-		var files = fs.readdirSync(documentDir);
+	if (fs.existsSync(this.documentDir)) {
+		var markdown = require( 'markdown' ).markdown;
+		var files = fs.readdirSync(this.documentDir);
 		for (var i in files) {
 			var file = files[i],
-				currentFile = path.join(documentDir, file);
+				currentFile = path.join(this.documentDir, file);
 			if (fs.statSync(currentFile).isFile()) {
 				var obj = {},
 					contents = fs.readFileSync(currentFile).toString();
 
 				obj[file] = markdown.toHTML(contents);
-				documentation.push(obj);
+				this.documentation.push(obj);
 			}
 		}
 	}
 
-	this.documentation = documentation;
 	next();
 };
-
 
 iOSModuleBuilder.prototype.packageModule = function (next) {
 	console.log("-- iOSBuilder.prototype.packageModule");
@@ -395,19 +551,10 @@ iOSModuleBuilder.prototype.packageModule = function (next) {
 		moduleId = this.manifest.moduleid,
 		version = this.manifest.version,
 		moduleZipName = [moduleId, '-iphone-', version, '.zip'].join(''),
-		moduleZipFullPath = path.join(this.projectDir, moduleZipName);
-
-	var moduleFolders = path.join("modules", "iphone", moduleId, version);
-		manifestFile = path.join(this.projectDir, "manifest"),
-		binarylibFile = path.join(this.projectDir, "build", "lib"+moduleId+".a"),
-		xcconfigFile = path.join(this.projectDir, "module.xcconfig");
-
-	//console.log("moduleZipName : " + moduleZipName);
-	//console.log("moduleFolders : " + moduleFolders);
-	//console.log("manifestFile : " + manifestFile);
-	//console.log("binarylibFile : " + binarylibFile);
-	//console.log("xcconfigFile : " + xcconfigFile);
-
+		moduleZipFullPath = path.join(this.projectDir, moduleZipName),
+		moduleFolders = path.join('modules', 'iphone', moduleId, version),
+		binarylibName = 'lib'+moduleId+'.a',
+		binarylibFile = path.join(this.projectDir, 'build', binarylibName);
 
 	// since the archiver library didn't set max listeners, we squelch all error output
 	console.error = function () {};
@@ -426,14 +573,47 @@ iOSModuleBuilder.prototype.packageModule = function (next) {
 		this.logger.info(__('Creating module zip'));
 
 		// 1. documentation folder
+		this.documentation.forEach(function (item) {
+			var fileName = Object.keys(item),
+				content = item[fileName],
+				filePath;
+
+			fileName = fileName.toString().replace('.md', '.html');
+			filePath = path.join(moduleFolders, 'documentation', fileName);
+
+			dest.append(content, { name: filePath });
+
+		}, this);
+
 		// 2. example folder
-		// 3. the merge *.a file
-		dest.append(fs.createReadStream(binarylibFile), { name: "lib"+moduleId+".a" });
-		// 4. LICENSE file
-		// 5. manifest
-		dest.append(fs.createReadStream(manifestFile), { name: 'manifest' });
-		// 6. module.xcconfig
-		dest.append(fs.createReadStream(xcconfigFile), { name: 'module.xcconfig' });
+		this.dirWalker(this.exampleDir, function (file) {
+			dest.append(fs.createReadStream(file), { name: path.join(moduleFolders, 'example', path.relative(this.exampleDir, file)) });
+		}.bind(this));
+
+
+		// 3. platform folder
+		this.dirWalker(this.platformDir, function (file) {
+			dest.append(fs.createReadStream(file), { name: path.join(moduleFolders, 'platform', path.relative(this.platformDir, file)) });
+		}.bind(this));
+
+		// 4. assets folder, not including js files
+		this.dirWalker(this.assetsDir, function (file) {
+			if (path.extname(file) != '.js') {
+				dest.append(fs.createReadStream(file), { name: path.join(moduleFolders, 'assets', path.relative(this.assetsDir, file)) });
+			}
+		}.bind(this));
+
+		// 5. the merge *.a file
+		// 6. LICENSE file
+		// 7. manifest
+		// 8. module.xcconfig
+		// 9. metadata.json
+
+		dest.append(fs.createReadStream(binarylibFile), { name: path.join(moduleFolders, binarylibName) });
+		dest.append(fs.createReadStream(this.licenseFile), { name: path.join(moduleFolders,'LICENSE') });
+		dest.append(fs.createReadStream(this.manifestFile), { name: path.join(moduleFolders,'manifest') });
+		dest.append(fs.createReadStream(this.tiXcconfigFile), { name: path.join(moduleFolders,'module.xcconfig') });
+		dest.append(fs.createReadStream(this.metaDataFile), { name: path.join(moduleFolders,'metadata.json') });
 
 		this.logger.info(__('Writing module zip: %s', moduleZipFullPath));
 		dest.finalize();
