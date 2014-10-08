@@ -158,7 +158,7 @@ iOSModuleBuilder.prototype.run = function (logger, config, cli, finished) {
 			cli.emit('build.pre.construct', this, next);
 		},
 
-		//'doAnalytics', //TODO <----
+		'doAnalytics',
 		'initialize',
 		'loginfo',
 		'processLicense',
@@ -175,6 +175,14 @@ iOSModuleBuilder.prototype.run = function (logger, config, cli, finished) {
 		});
 	});
 };
+
+iOSModuleBuilder.prototype.doAnalytics = function (next) {
+
+	//TODO
+
+	next();
+};
+
 
 iOSModuleBuilder.prototype.initialize = function (next) {
 	console.log("-- iOSBuilder.prototype.initialize");
@@ -244,7 +252,6 @@ iOSModuleBuilder.prototype.dirWalker = function (currentPath, callback) {
 };
 
 iOSModuleBuilder.prototype.processLicense = function (next) {
-
 	if (fs.existsSync(this.licenseFile)) {
 		if (fs.readFileSync(this.licenseFile).toString().indexOf(this.licenseDefault) != -1) {
 			this.logger.warn(__('Please update the LICENSE file with your license text before distributing.'));
@@ -254,7 +261,6 @@ iOSModuleBuilder.prototype.processLicense = function (next) {
 };
 
 iOSModuleBuilder.prototype.processTiXcconfig = function (next) {
-
 	var	re = /^(\S+)\s*=\s*(.*)$/,
 		bindingReg = /\$\(([^$]+)\)/g,
 		match,
@@ -264,17 +270,23 @@ iOSModuleBuilder.prototype.processTiXcconfig = function (next) {
 		fs.readFileSync(this.tiXcconfigFile).toString().split('\n').forEach(function (line) {
 			match = line.match(re);
 			if (match) {
-				var value = match[2].trim();
-				bindingMatch = value.match(bindingReg);
-				if (bindingMatch) {
-					bindingMatch.forEach(function (key) {
-						// TODO grab keys in $( )
-						//dump(key);
-						//$(TITANIUM_BASE_SDK) $(TITANIUM_BASE_SDK2)
-					});
-				} else {
-					this.tiXcconfig[match[1].trim()] = value;
+				var keyList = [],
+					value = match[2].trim();
+
+				bindingMatch = bindingReg.exec(value);
+				if(bindingMatch!=null){
+					while (bindingMatch != null) {
+						keyList.push(bindingMatch[1]);
+						bindingMatch = bindingReg.exec(value);
+					}
+
+					keyList.forEach(function (key) {
+						if (this.tiXcconfig[key]) {
+							value = value.replace('$('+key+')', this.tiXcconfig[key]);
+						}
+					}, this);
 				}
+				this.tiXcconfig[match[1].trim()] = value;
 			}
 		}, this);
 	}
@@ -283,8 +295,6 @@ iOSModuleBuilder.prototype.processTiXcconfig = function (next) {
 };
 
 iOSModuleBuilder.prototype.compileJS = function (next) {
-	console.log("-- iOSBuilder.prototype.compileJS");
-
 	var moduleJS = this.manifest.moduleid + '.js',
 		jsFile = path.join(this.assetsDir, moduleJS ),
 		renderData = {
@@ -386,8 +396,6 @@ iOSModuleBuilder.prototype.compileJS = function (next) {
 };
 
 iOSModuleBuilder.prototype.generateExport = function (next) {
-	console.log("-- iOSBuilder.prototype.generateExport");
-
 	this.jsFilesToEncrypt.forEach(function(file) {
 		var r = jsanalyze.analyzeJsFile(file, { minify: true });
 		this.tiSymbols[file] = r.symbols;
@@ -401,8 +409,6 @@ iOSModuleBuilder.prototype.generateExport = function (next) {
 };
 
 iOSModuleBuilder.prototype.buildModule = function (next) {
-	console.log("-- iOSBuilder.prototype.buildModule");
-
 	var xcodebuildHook = this.cli.createHook('build.ios.xcodebuild', this, function (exe, args, opts, done) {
 			var p = spawn(exe, args, opts),
 				out = [],
@@ -492,8 +498,6 @@ iOSModuleBuilder.prototype.buildModule = function (next) {
 };
 
 iOSModuleBuilder.prototype.createUniBinary = function (next) {
-	console.log("-- iOSBuilder.prototype.createUniBinary");
-
 	// Create a universal build by merging the all builds to a single binary
 	var binaryFiles = [],
 		outputFile = path.join(this.projectDir, 'build', 'lib'+this.manifest['moduleid']+'.a'),
@@ -518,8 +522,6 @@ iOSModuleBuilder.prototype.createUniBinary = function (next) {
 };
 
 iOSModuleBuilder.prototype.generateDoc = function (next) {
-	console.log("-- iOSBuilder.prototype.genereateDoc");
-
 	if (fs.existsSync(this.documentDir)) {
 		var markdown = require( 'markdown' ).markdown;
 		var files = fs.readdirSync(this.documentDir);
@@ -540,8 +542,6 @@ iOSModuleBuilder.prototype.generateDoc = function (next) {
 };
 
 iOSModuleBuilder.prototype.packageModule = function (next) {
-	console.log("-- iOSBuilder.prototype.packageModule");
-
 	var dest = archiver('zip', {
 			forceUTC: true
 		}),
@@ -608,7 +608,6 @@ iOSModuleBuilder.prototype.packageModule = function (next) {
 		// 7. manifest
 		// 8. module.xcconfig
 		// 9. metadata.json
-
 		dest.append(fs.createReadStream(binarylibFile), { name: path.join(moduleFolders, binarylibName) });
 		dest.append(fs.createReadStream(this.licenseFile), { name: path.join(moduleFolders,'LICENSE') });
 		dest.append(fs.createReadStream(this.manifestFile), { name: path.join(moduleFolders,'manifest') });
