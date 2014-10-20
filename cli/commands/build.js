@@ -120,20 +120,14 @@ exports.config = function (logger, config, cli) {
 										}
 
 										cli.argv.type = 'app';
-										dump("FOUND tiapp.xml");
 
 									} else if (fs.existsSync(path.join(projectDir, 'timodule.xml'))) {
-										// QUESTION: instead of using tiappxml,
-										// should we parse 'timodule.xml' differently?
-										// build.py doesn't use timodule.xml
 										var timodule = cli.timodule = new tiappxml(path.join(projectDir, 'timodule.xml'));
 										timodule.properties || (timodule.properties = {});
 
 										cli.argv.type = 'module';
-										dump("FOUND timodule.xml");
 
 									} else {
-										dump("FOUND nothing");
 										// neither app nor module
 										return;
 									}
@@ -160,23 +154,20 @@ exports.config = function (logger, config, cli) {
 							},
 							required: true,
 							validate: function (projectDir, callback) {
-								dump("VALIDATE");
-								var isDefault = projectDir == conf.options['project-dir'].default;
-
-								var dir = appc.fs.resolvePath(projectDir);
+								var isDefault = projectDir == conf.options['project-dir'].default,
+									dir = appc.fs.resolvePath(projectDir);
 
 								if (!fs.existsSync(dir)) {
 									return callback(new Error(__('Project directory does not exist')));
 								}
 
 								var isFound,
-									root = path.resolve('/');
+									root = path.resolve('/'),
+									projDir = dir;
 
 								['tiapp.xml', 'timodule.xml'].some(function (tiXml) {
-									dump(">>" + tiXml);
-									dir = appc.fs.resolvePath(projectDir);
+
 									var tiFile = path.join(dir, tiXml);
-									dump(">"+tiFile);
 
 									while (!fs.existsSync(tiFile)) {
 										dir = path.dirname(dir);
@@ -185,7 +176,6 @@ exports.config = function (logger, config, cli) {
 											break;
 										}
 										tiFile = path.join(dir, tiXml);
-										dump("--> " + tiFile);
 									}
 
 									// Found the xml file, break the loop
@@ -193,7 +183,8 @@ exports.config = function (logger, config, cli) {
 										isFound = true;
 										return true;
 									}
-									dump(">>> " + dir);
+
+									dir = projDir;
 								});
 
 								if (!isFound && dir == root && isDefault) {
@@ -221,11 +212,9 @@ exports.config = function (logger, config, cli) {
 };
 
 exports.validate = function (logger, config, cli) {
-	// TODO: set the type to 'app' for now, but we'll need to determine if the project is an app or a module
-	//cli.argv.type = 'app';
 
+	// Determine if the project is an app or a module, run appropriate build command
 	if (cli.argv.type === 'module') {
-		logger.info("------ module validate");
 
 		return function (finished) {
 			var result = ti.validatePlatformOptions(logger, config, cli, 'buildModule');
@@ -236,7 +225,6 @@ exports.validate = function (logger, config, cli) {
 		};
 
 	} else {
-		logger.info("------ app validate");
 
 		ti.validatePlatform(logger, cli, 'platform');
 
@@ -266,8 +254,6 @@ exports.validate = function (logger, config, cli) {
 };
 
 exports.run = function (logger, config, cli, finished) {
-	logger.info("----->>> run");
-	logger.info("----->>> cli.argv.type: " + cli.argv.type);
 
 	var buildFile = (cli.argv.type === 'module') ? '_buildModule.js' :'_build.js',
 		platform = ti.resolvePlatform(cli.argv.platform),
