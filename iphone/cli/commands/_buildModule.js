@@ -1,5 +1,5 @@
 /**
-* iOS build command.
+* iOS module build command.
 *
 * @module cli/_buildModule
 *
@@ -120,7 +120,6 @@ iOSModuleBuilder.prototype.validate = function (logger, config, cli) {
 	this.xcodeEnv = null;
 
 	return function(finished) {
-		logger.info("return validate");
 
 		ioslib.detect({
 			// env
@@ -141,14 +140,13 @@ iOSModuleBuilder.prototype.validate = function (logger, config, cli) {
 				logger.error(__('Unable to find suitable Xcode install that supports iOS SDK %s', cli.argv['ios-version']) + '\n');
 				process.exit(1);
 			}
+			finished();
 		}.bind(this));
 	}.bind(this);
 };
 
 iOSModuleBuilder.prototype.run = function (logger, config, cli, finished) {
 	Builder.prototype.run.apply(this, arguments);
-
-	console.log("--- iOSModuleBuilder run");
 
 	this.cli = cli;
 	this.logger = logger;
@@ -164,7 +162,6 @@ iOSModuleBuilder.prototype.run = function (logger, config, cli, finished) {
 		'processLicense',
 		'processTiXcconfig',
 		'compileJS',
-		'generateExport',
 		'buildModule',
 		'createUniBinary',
 		'generateDoc',
@@ -178,14 +175,28 @@ iOSModuleBuilder.prototype.run = function (logger, config, cli, finished) {
 
 iOSModuleBuilder.prototype.doAnalytics = function (next) {
 
-	//TODO
+	var cli = this.cli,
+		manifest = this.manifest,
+		eventName = 'ios.' + cli.argv.type;
+
+	cli.addAnalyticsEvent(eventName, {
+		dir: cli.argv['project-dir'],
+		name: manifest.name,
+		publisher: manifest.author,
+		appid: manifest.moduleid,
+		description: manifest.description,
+		type: cli.argv.type,
+		guid: manifest.guid,
+		version: manifest.version,
+		copyright: manifest.copyright,
+		date: (new Date()).toDateString()
+	});
 
 	next();
 };
 
 
 iOSModuleBuilder.prototype.initialize = function (next) {
-	console.log("-- iOSBuilder.prototype.initialize");
 
 	this.moduleIdAsIdentifier = this.manifest['moduleid'].replace(/[\s-]/g, '_').replace(/_+/g, '_').split(/\./).map(function (s) { return s.substring(0, 1).toUpperCase() + s.substring(1); }).join('');
 	this.tiSymbols = {};
@@ -231,6 +242,7 @@ iOSModuleBuilder.prototype.initialize = function (next) {
 };
 
 iOSModuleBuilder.prototype.loginfo = function (next) {
+	this.logger.debug(__('Titanium SDK iOS directory: %s', this.platformPath.cyan));
 	this.logger.info(__('Project directory: %s', this.projectDir.cyan));
 	this.logger.info(__('Module ID: %s', this.manifest['moduleid'].cyan));
 
@@ -257,6 +269,7 @@ iOSModuleBuilder.prototype.processLicense = function (next) {
 			this.logger.warn(__('Please update the LICENSE file with your license text before distributing.'));
 		}
 	}
+
 	next();
 };
 
@@ -295,8 +308,11 @@ iOSModuleBuilder.prototype.processTiXcconfig = function (next) {
 };
 
 iOSModuleBuilder.prototype.compileJS = function (next) {
+
+	this.jsFilesToEncrypt = [];
+
 	var moduleJS = this.manifest.moduleid + '.js',
-		jsFile = path.join(this.assetsDir, moduleJS ),
+		jsFile = path.join(this.assetsDir, moduleJS),
 		renderData = {
 			'moduleIdAsIdentifier' : this.moduleIdAsIdentifier,
 			'mainEncryptedAssetReturn': 'return filterDataInRange([NSData dataWithBytesNoCopy:data length:sizeof(data) freeWhenDone:NO], ranges[0]);',
@@ -304,154 +320,176 @@ iOSModuleBuilder.prototype.compileJS = function (next) {
 				+ '\n\t\tif (index == nil) {\n\t\t\treturn nil;\n\t\t}'
 				+ '\n\t\treturn filterDataInRange([NSData dataWithBytesNoCopy:data length:sizeof(data) freeWhenDone:NO], ranges[index.integerValue]);'
 		},
-		_t = this;
+		titaniumPrepHook = this.cli.createHook('build.ios.titaniumprep', this, function (exe, args, opts, done) {
+			var tries = 0,
+				completed = false,
+				jsFilesToEncrypt = opts.jsFiles,
+				placeHolderName = opts.placeHolder;
 
-	this.jsFilesToEncrypt = [ jsFile ];
+			this.logger.info('Encrypting JavaScript files: %s', (exe + ' "' + args.join('" "') + '"').cyan);
+			jsFilesToEncrypt.forEach(function (file) {
+				this.logger.debug(__('Preparing %s', file.cyan));
+			}, this);
 
-	function reRenderTemplate() {
-		var data = ejs.render(fs.readFileSync(_t.assetsTemplateFile).toString(), renderData),
-			moduleAssetsFile = path.join(_t.projectDir, 'Classes', _t.moduleIdAsIdentifier+'ModuleAssets.m');
-
-		_t.logger.debug(__('Writing module assets file: %s', moduleAssetsFile.cyan));
-		fs.writeFileSync(moduleAssetsFile, data);
-
-		next();
-	}
-
-	var titaniumPrepHook = this.cli.createHook('build.ios.titaniumprep', this, function (exe, args, opts, done) {
-		var tries = 0,
-			completed = false,
-			jsFilesToEncrypt = opts.jsFiles,
-			placeHolderName = opts.placeHolder;
-
-		this.logger.info('Encrypting JavaScript files: %s', (exe + ' "' + args.join('" "') + '"').cyan);
-		jsFilesToEncrypt.forEach(function (file) {
-			this.logger.debug(__('Preparing %s', file.cyan));
-		}, this);
-
-		async.whilst(
-			function () {
-				if (tries > 3) {
-					// we failed 3 times, so just give up
-					this.logger.error(__('titanium_prep failed to complete successfully'));
-					this.logger.error(__('Try cleaning this project and build again') + '\n');
-					process.exit(1);
-				}
-				return !completed;
-			},
-			function (cb) {
-				var child = spawn(exe, args, opts),
-					out = '';
-
-				child.stdin.write(jsFilesToEncrypt.join('\n'));
-				child.stdin.end();
-
-				child.stdout.on('data', function (data) {
-					out += data.toString();
-				});
-
-				child.on('close', function (code) {
-					if (code) {
-						this.logger.error(__('titanium_prep failed to run (%s)', code) + '\n');
+			async.whilst(
+				function () {
+					if (tries > 3) {
+						// we failed 3 times, so just give up
+						this.logger.error(__('titanium_prep failed to complete successfully'));
+						this.logger.error(__('Try cleaning this project and build again') + '\n');
 						process.exit(1);
 					}
+					return !completed;
+				},
+				function (cb) {
+					var child = spawn(exe, args, opts),
+						out = '';
 
-					if (out.indexOf('initWithObjectsAndKeys') !== -1) {
-						// success!
-						renderData[placeHolderName] = out;
+					child.stdin.write(jsFilesToEncrypt.join('\n'));
+					child.stdin.end();
 
-						completed = true;
-					} else {
-						// failure, maybe it was a fluke, try again
-						this.logger.warn(__('titanium_prep failed to complete successfully, trying again'));
-						tries++;
-					}
-					cb();
-				}.bind(this));
-			}.bind(this),
-			done
-		);
-	});
+					child.stdout.on('data', function (data) {
+						out += data.toString();
+					});
 
-	// first compile module js
-	titaniumPrepHook(
-		path.join(this.titaniumIosSdkPath, 'titanium_prep'),
-		[this.manifest['moduleid'], this.assetsDir],
-		{'jsFiles': this.jsFilesToEncrypt, 'placeHolder': 'mainEncryptedAsset'},
-		null
-	);
+					child.on('close', function (code) {
+						if (code) {
+							this.logger.error(__('titanium_prep failed to run (%s)', code) + '\n');
+							process.exit(1);
+						}
 
-	this.dirWalker(this.assetsDir, function (file) {
-		if (path.extname(file) === '.js' && this.jsFilesToEncrypt.indexOf(file) === -1) {
-			this.jsFilesToEncrypt.push(file);
+						if (out.indexOf('initWithObjectsAndKeys') !== -1) {
+							// success!
+							renderData[placeHolderName] = out;
+
+							completed = true;
+						} else {
+							// failure, maybe it was a fluke, try again
+							this.logger.warn(__('titanium_prep failed to complete successfully, trying again'));
+							tries++;
+						}
+						cb();
+					}.bind(this));
+				}.bind(this),
+				done
+			);
+		});
+
+	var tasks = [
+		// 1. compile module js
+		function (cb) {
+			fs.existsSync(jsFile) && this.jsFilesToEncrypt.push(jsFile);
+
+			if (!this.jsFilesToEncrypt.length) {
+				renderData['mainEncryptedAsset'] = '';
+				renderData['mainEncryptedAssetReturn'] = 'return nil;';
+				return cb();
+			}
+
+			titaniumPrepHook(
+				path.join(this.titaniumIosSdkPath, 'titanium_prep'),
+				[this.manifest['moduleid'], this.assetsDir],
+				{'jsFiles': this.jsFilesToEncrypt, 'placeHolder': 'mainEncryptedAsset'},
+				cb
+			);
+		},
+
+		// 2. compile all other js files in assets dir
+		function (cb) {
+			this.dirWalker(this.assetsDir, function (file) {
+				if (path.extname(file) === '.js' && this.jsFilesToEncrypt.indexOf(file) === -1) {
+					this.jsFilesToEncrypt.push(file);
+				}
+			}.bind(this));
+
+			var jsFilesCount = this.jsFilesToEncrypt.length;
+
+			if (jsFilesCount == 0 || ( fs.existsSync(jsFile) && jsFilesCount == 1)) {
+				renderData['allEncryptedAssets'] = renderData['mainEncryptedAsset'];
+				renderData['allEncryptedAssetsReturn'] = 'return nil;';
+				cb();
+			} else {
+				titaniumPrepHook(
+					path.join(this.titaniumIosSdkPath, 'titanium_prep'),
+					[this.manifest['moduleid'], this.assetsDir],
+					{'jsFiles': this.jsFilesToEncrypt, 'placeHolder': 'allEncryptedAssets'},
+					cb
+				);
+			}
+		},
+
+		// 3. write encrypted data to template
+		function (cb) {
+			var data = ejs.render(fs.readFileSync(this.assetsTemplateFile).toString(), renderData),
+				moduleAssetsFile = path.join(this.projectDir, 'Classes', this.moduleIdAsIdentifier+'ModuleAssets.m');
+
+			this.logger.debug(__('Writing module assets file: %s', moduleAssetsFile.cyan));
+			fs.writeFileSync(moduleAssetsFile, data);
+			cb();
+		},
+
+		// 4. genereate exports
+		function (cb) {
+			this.jsFilesToEncrypt.forEach(function(file) {
+				var r = jsanalyze.analyzeJsFile(file, { minify: true });
+				this.tiSymbols[file] = r.symbols;
+				this.metaData.push.apply(this.metaData, r.symbols);
+			}.bind(this));
+
+			fs.existsSync(this.metaDataFile) && fs.unlinkSync(this.metaDataFile);
+			fs.writeFileSync('metadata.json', JSON.stringify({ "exports": this.metaData }));
+
+			cb();
 		}
-	}.bind(this));
+	];
 
-	titaniumPrepHook(
-		path.join(this.titaniumIosSdkPath, 'titanium_prep'),
-		[this.manifest['moduleid'], this.assetsDir],
-		{'jsFiles': this.jsFilesToEncrypt, 'placeHolder': 'allEncryptedAssets'},
-		reRenderTemplate
-	);
+	appc.async.series(this, tasks, next);
 };
 
-iOSModuleBuilder.prototype.generateExport = function (next) {
-	this.jsFilesToEncrypt.forEach(function(file) {
-		var r = jsanalyze.analyzeJsFile(file, { minify: true });
-		this.tiSymbols[file] = r.symbols;
-		this.metaData.push.apply(this.metaData, r.symbols);
-	}.bind(this));
-
-	fs.existsSync(this.metaDataFile) && fs.unlinkSync(this.metaDataFile);
-	fs.writeFileSync('metadata.json', JSON.stringify({ "exports": this.metaData }));
-
-	next();
-};
 
 iOSModuleBuilder.prototype.buildModule = function (next) {
 	var xcodebuildHook = this.cli.createHook('build.ios.xcodebuild', this, function (exe, args, opts, done) {
-			var p = spawn(exe, args, opts),
-				out = [],
-				err = [],
-				stopOutputting = false;
+		var p = spawn(exe, args, opts),
+			out = [],
+			err = [],
+			stopOutputting = false;
 
-			p.stdout.on('data', function (data) {
-				data.toString().split('\n').forEach(function (line) {
-					if (line.length) {
-						out.push(line);
-						if (line.indexOf('Failed to minify') != -1) {
-							stopOutputting = true;
-						}
-						if (!stopOutputting) {
-							this.logger.trace(line);
-						}
+		p.stdout.on('data', function (data) {
+			data.toString().split('\n').forEach(function (line) {
+				if (line.length) {
+					out.push(line);
+					if (line.indexOf('Failed to minify') != -1) {
+						stopOutputting = true;
 					}
-				}, this);
-			}.bind(this));
-
-			p.stderr.on('data', function (data) {
-				data.toString().split('\n').forEach(function (line) {
-					if (line.length) {
-						err.push(line);
+					if (!stopOutputting) {
+						this.logger.trace(line);
 					}
-				}, this);
-			}.bind(this));
-
-			p.on('close', function (code, signal) {
-				if (code) {
-					// just print the entire error buffer
-					err.forEach(function (line) {
-						this.logger.error(line);
-					}, this);
-					this.logger.log();
-					process.exit(1);
 				}
+			}, this);
+		}.bind(this));
 
-				// end of the line
-				done(code);
-			}.bind(this));
+		p.stderr.on('data', function (data) {
+			data.toString().split('\n').forEach(function (line) {
+				if (line.length) {
+					err.push(line);
+				}
+			}, this);
+		}.bind(this));
 
-		});
+		p.on('close', function (code, signal) {
+			if (code) {
+				// just print the entire error buffer
+				err.forEach(function (line) {
+					this.logger.error(line);
+				}, this);
+				this.logger.log();
+				process.exit(1);
+			}
+
+			// end of the line
+			done(code);
+		}.bind(this));
+	});
 
 	// Create a build for the device
 	xcodebuildHook(
@@ -509,7 +547,7 @@ iOSModuleBuilder.prototype.createUniBinary = function (next) {
 
 	this.dirWalker(this.universalBinaryDir, function (file) {
 		if (path.extname(file) === '.a'
-			&& file.indexOf('test.build') === -1
+			&& file.indexOf( this.manifest['name'] + '.build') === -1
 			&& file.indexOf('Release-') > -1
 		) {
 			binaryFiles.push(file);

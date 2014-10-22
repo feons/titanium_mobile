@@ -219,9 +219,10 @@ exports.validate = function (logger, config, cli) {
 		return function (finished) {
 			var result = ti.validatePlatformOptions(logger, config, cli, 'buildModule');
 			if (result && typeof result == 'function') {
-				result();
+				result(finished);
+			} else {
+				finished(result);
 			}
-			finished(result);
 		};
 
 	} else {
