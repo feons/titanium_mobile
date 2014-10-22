@@ -176,6 +176,7 @@ exports.config = function (logger, config, cli) {
 											break;
 										}
 										tiFile = path.join(dir, tiXml);
+
 									}
 
 									// Found the xml file, break the loop
